@@ -1,0 +1,17 @@
+# venv
+.venv/
+venv/
+
+# data — public dataset, don't bloat the repo
+*.csv
+*.duckdb
+*.duckdb.wal
+data/
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# env / secrets
+.env
