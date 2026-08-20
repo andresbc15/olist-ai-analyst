@@ -10,10 +10,19 @@ venv/
 *.duckdb.wal
 data/
 
+# dbt build artifacts and vendored packages
+transform/target/
+transform/dbt_packages/
+transform/logs/
+
 # python
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# node / frontend
+node_modules/
+web/dist/
 
 # env / secrets
 .env

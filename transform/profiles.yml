@@ -1,0 +1,10 @@
+olist:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # ABSOLUTE PATH VIA ENV VAR. A RELATIVE PATH RESOLVES AGAINST THE CURRENT
+      # WORKING DIRECTORY, SO DBT AND THE API WOULD SILENTLY OPEN DIFFERENT
+      # FILES — DUCKDB CREATES A NEW EMPTY DATABASE RATHER THAN ERRORING.
+      path: "{{ env_var('OLIST_DB_PATH') }}"
+      schema: main
