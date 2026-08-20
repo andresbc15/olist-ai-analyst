@@ -1,0 +1,29 @@
+
+    
+    select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+  -- A DELIVERED ORDER MUST CARRY THE TIMESTAMPS THAT PROVE IT WAS DELIVERED.
+-- WITHOUT THEM, ANY DELIVERY-TIME METRIC FILTERING ON ORDER_STATUS SILENTLY
+-- DROPS THE ROW AND UNDERSTATES BOTH VOLUME AND LEAD TIME.
+SELECT
+    order_id,
+    order_status,
+    order_approved_at,
+    order_delivered_carrier_date,
+    order_delivered_customer_date
+FROM "olist"."main_stg"."stg_olist__orders"
+WHERE order_status = 'delivered'
+  AND (
+      order_delivered_customer_date IS NULL
+      OR order_delivered_carrier_date IS NULL
+      OR order_approved_at IS NULL
+  )
+  
+  
+      
+    ) dbt_internal_test

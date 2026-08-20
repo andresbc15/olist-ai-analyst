@@ -1,0 +1,407 @@
+version: 2
+
+models:
+  - name: stg_olist__orders
+    description: >
+      One row per order — the hub every other transactional model joins to. Source is
+      the Olist Brazilian E-Commerce public dataset (real, anonymised marketplace data,
+      2016–2018). order_status is a snapshot at extract time, not a history: an order
+      sits in exactly one state. Only `delivered` orders are safe to treat as revenue;
+      `unavailable` and `canceled` never ship. The four lifecycle timestamps are
+      progressively nullable — order_approved_at is null when payment never cleared,
+      carrier/customer dates are null for anything that did not reach that stage — so
+      delivery-time metrics must filter on order_status = 'delivered' rather than
+      assume the dates are populated. order_estimated_delivery_date is cast to DATE
+      (the source carries a zeroed time component); the rest stay timestamps.
+    columns:
+      - name: order_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: customer_id
+        description: >
+          Foreign key to stg_olist__customers. Unique here — the source issues a fresh
+          customer_id per order, so this is 1:1, not many-to-one. Join through to
+          customer_unique_id to get the actual person.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__customers')
+                field: customer_id
+      - name: order_status
+        description: Order state at extract time.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - delivered
+                  - shipped
+                  - canceled
+                  - unavailable
+                  - invoiced
+                  - processing
+                  - created
+                  - approved
+      - name: order_purchase_timestamp
+        description: When the customer placed the order. The only always-populated timestamp.
+        tests: [not_null]
+      - name: order_approved_at
+        description: When payment was approved. Null when payment never cleared.
+      - name: order_delivered_carrier_date
+        description: When the seller handed the order to the logistics partner. Null pre-dispatch.
+      - name: order_delivered_customer_date
+        description: >
+          When the customer actually received the order. Null unless delivered — this is
+          the field to measure real delivery time against, not the estimate.
+      - name: order_estimated_delivery_date
+        description: >
+          Delivery date promised to the customer at purchase. Compare against
+          order_delivered_customer_date for on-time performance.
+        tests: [not_null]
+
+  - name: stg_olist__order_items
+    description: >
+      One row per item line on an order, and the bridge that fans an order out to
+      products and sellers. order_item_id is a per-order sequence (1, 2, 3…), not a product key.
+      A product bought twice on one order appears as two rows, so it doubles as the
+      quantity. price is per unit and excludes freight; freight_value is that item's
+      share of an order-level shipping cost that was split across items, so order
+      revenue is SUM(price + freight_value), never price alone. Not every order has
+      items — ~775 orders (mostly `unavailable`) have none, so join LEFT from orders.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, order_item_id]
+    columns:
+      - name: order_id
+        description: Foreign key to stg_olist__orders. Not unique — one order has 1..n items.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: order_item_id
+        description: Sequential item number within the order. Use as quantity when aggregating.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+                inclusive: true
+      - name: product_id
+        description: Foreign key to stg_olist__products.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__products')
+                field: product_id
+      - name: seller_id
+        description: >
+          Foreign key to stg_olist__sellers. Set per item, not per order — a single order
+          can be fulfilled by several sellers.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__sellers')
+                field: seller_id
+      - name: shipping_limit_date
+        description: Deadline for the seller to hand this item to the logistics partner.
+        tests: [not_null]
+      - name: price
+        description: >
+          Item price in BRL, excluding freight. DECIMAL(10,2), not float — the source
+          is a double and will not sum exactly if left that way.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+      - name: freight_value
+        description: >
+          This item's share of the order's freight in BRL. Can be 0 on free-shipping
+          promotions.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+
+  - name: stg_olist__order_payments
+    description: >
+      One row per payment instrument used on an order. Grain is order_id +
+      payment_sequential — a customer can split one order across several methods
+      (commonly vouchers stacked onto a card), so summing payment_value without
+      grouping by order double-counts. payment_value is the amount on that instrument;
+      the order total is the SUM across its rows and should reconcile to
+      SUM(price + freight_value) in stg_olist__order_items. Exceptions: payment_type
+      `not_defined` exists on a handful of zero-value rows, and payment_installments is
+      0 on a couple of credit_card rows where it should read 1.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, payment_sequential]
+    columns:
+      - name: order_id
+        description: Foreign key to stg_olist__orders. Not unique — one order has 1..n payments.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: payment_sequential
+        description: Sequence number distinguishing multiple payment types on one order.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+                inclusive: true
+      - name: payment_type
+        description: Payment method used. `boleto` is a Brazilian cash/bank voucher.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [credit_card, boleto, voucher, debit_card, not_defined]
+      - name: payment_installments
+        description: >
+          Number of instalments chosen. 1 means paid in full. Only credit_card carries
+          values above 1; a few rows report 0 where 1 is meant.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+      - name: payment_value
+        description: Amount charged to this paymeny type in BRL, as DECIMAL(10,2).
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+
+  - name: stg_olist__order_reviews
+    description: >
+      One row per satisfaction survey response, sent by email once the order is
+      delivered or its estimated delivery date passes. Grain is review_id + order_id —
+      review_id alone is NOT unique (one survey can span a multi-order purchase) and
+      order_id alone is NOT unique (an order can be surveyed more than once), so this
+      never joins 1:1 to orders; aggregate to one score per order before joining, or
+      order-level counts will inflate. Coverage is partial — orders with no response
+      have no row. Both comment fields are free text in Portuguese and mostly null;
+      brand names in them were replaced with Game of Thrones houses during
+      anonymisation, so they are unreliable for entity extraction. Empty strings are
+      normalised to null here.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [review_id, order_id]
+    columns:
+      - name: review_id
+        description: Survey identifier. Not unique — one survey can cover several orders.
+        tests: [not_null]
+      - name: order_id
+        description: Foreign key to stg_olist__orders. Not unique — an order can be surveyed twice.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: review_score
+        description: Customer satisfaction, 1 (worst) to 5 (best). Heavily skewed toward 5.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+      - name: review_comment_title
+        description: Optional free-text title, Portuguese. Null on most rows.
+      - name: review_comment_message
+        description: Optional free-text body, Portuguese. Null on most rows.
+      - name: review_creation_date
+        description: When the survey was sent to the customer.
+        tests: [not_null]
+      - name: review_answer_timestamp
+        description: When the customer submitted the response.
+        tests: [not_null]
+
+  - name: stg_olist__customers
+    description: >
+      One row per customer per order, NOT one row per person. The source mints a fresh
+      customer_id for every order, so customer_id is unique here and joins 1:1 to
+      stg_olist__orders. customer_unique_id is the stable person-level key and repeats
+      across rows — use it, not customer_id, for anything about repeat purchase,
+      retention, or CLV. Location is the delivery address recorded on that order, so a
+      person who moved has different values on different rows.
+    columns:
+      - name: customer_id
+        description: Primary key. Order-scoped — one per order, not one per person.
+        tests: [unique, not_null]
+      - name: customer_unique_id
+        description: >
+          Stable person-level identifier. Repeats across orders; the correct grain for
+          customer-level analysis.
+        tests: [not_null]
+      - name: customer_zip_code_prefix
+        description: >
+          First five digits of the delivery postcode. Kept as text to preserve leading
+          zeros — casting to a number corrupts it. Joins to stg_olist__geolocation, but
+          a small number of prefixes are absent there, hence the warn-level test.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__geolocation')
+                field: geolocation_zip_code_prefix
+              config:
+                severity: warn
+      - name: customer_city
+        description: Delivery city, lowercase and unaccented in the source. Whitespace trimmed.
+        tests: [not_null]
+      - name: customer_state
+        description: Two-letter Brazilian state code. SP dominates the dataset.
+        tests: [not_null]
+
+  - name: stg_olist__sellers
+    description: >
+      One row per merchant that fulfilled at least one order item. Sellers are reached
+      through stg_olist__order_items, never directly from an order, because a single
+      order can involve several sellers. Location is the dispatch origin, which drives
+      freight cost and delivery time against the customer's state.
+    columns:
+      - name: seller_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: seller_zip_code_prefix
+        description: >
+          First five digits of the dispatch postcode. Text, to preserve leading zeros.
+          A handful of prefixes are missing from stg_olist__geolocation.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__geolocation')
+                field: geolocation_zip_code_prefix
+              config:
+                severity: warn
+      - name: seller_city
+        description: >
+          Dispatch city, lowercase in the source and dirtier than the customer
+          equivalent (spelling variants, occasional state suffixes). Whitespace trimmed.
+        tests: [not_null]
+      - name: seller_state
+        description: Two-letter Brazilian state code.
+        tests: [not_null]
+
+  - name: stg_olist__products
+    description: >
+      One row per product listed on the marketplace. product_category_name is the root
+      category in Portuguese — join stg_olist__product_category_translation for English,
+      and LEFT join, because a couple of categories have no translation. Category is
+      null for a subset of products; keep those out of category breakdowns rather than
+      bucketing them as unknown revenue. The publisher's misspellings `product_name_lenght`
+      and `product_description_lenght` are corrected to `_length` here. Dimension and
+      weight fields describe the shipping box and drive freight cost; zeros in the
+      source are physically impossible and are normalised to null.
+    columns:
+      - name: product_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: product_category_name
+        description: >
+          Root category, Portuguese. Nullable. Warn-level relationship test because a
+          couple of categories are absent from the translation lookup.
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_olist__product_category_translation')
+                field: product_category_name
+              config:
+                severity: warn
+      - name: product_name_length
+        description: Character count of the product name. Renamed from the source's `lenght`.
+      - name: product_description_length
+        description: Character count of the description. Renamed from the source's `lenght`.
+      - name: product_photos_qty
+        description: Number of published photos on the listing.
+      - name: product_weight_g
+        description: Shipping weight in grams. Null where the source recorded 0.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+      - name: product_length_cm
+        description: Shipping box length in centimetres. Null where the source recorded 0.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+      - name: product_height_cm
+        description: Shipping box height in centimetres. Null where the source recorded 0.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+      - name: product_width_cm
+        description: Shipping box width in centimetres. Null where the source recorded 0.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+
+  - name: stg_olist__product_category_translation
+    description: >
+      Portuguese to English lookup for product categories, one row per category. Does
+      not cover every category present in stg_olist__products, so always LEFT join and
+      coalesce back to the Portuguese name rather than dropping rows.
+    columns:
+      - name: product_category_name
+        description: Primary key. Category name in Portuguese, as stored on products.
+        tests: [unique, not_null]
+      - name: product_category_name_english
+        description: English label for reporting.
+        tests: [unique, not_null]
+
+  - name: stg_olist__geolocation
+    description: >
+      Geocoded points for Brazilian postcode prefixes — one row per point, NOT one row
+      per prefix, so this can never be joined directly to customers or sellers without
+      fanning rows out. Collapse to one point per prefix first (centroid, or median to
+      resist outliers). Exact duplicate rows are removed here, which does not make the
+      prefix unique. Coordinates are unvalidated: a small number of points fall well
+      outside Brazil's bounding box and will drag a mean centroid into the ocean, so
+      filter to roughly lat -34..6 and lng -74..-34 before averaging.
+    columns:
+      - name: geolocation_zip_code_prefix
+        description: >
+          First five digits of the postcode. NOT unique — this is the join key to
+          customers and sellers, but only after deduplication downstream.
+        tests: [not_null]
+      - name: geolocation_lat
+        description: Latitude, WGS84. Contains out-of-country outliers.
+        tests: [not_null]
+      - name: geolocation_lng
+        description: Longitude, WGS84. Contains out-of-country outliers.
+        tests: [not_null]
+      - name: geolocation_city
+        description: City name, lowercase in the source and inconsistently spelled. Trimmed.
+        tests: [not_null]
+      - name: geolocation_state
+        description: Two-letter Brazilian state code.
+        tests: [not_null]

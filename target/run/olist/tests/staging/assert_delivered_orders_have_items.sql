@@ -1,0 +1,23 @@
+
+    
+    select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+  -- REVENUE IS COMPUTED FROM ORDER ITEMS, SO A DELIVERED ORDER WITH NO ITEM ROWS
+-- CONTRIBUTES NOTHING AND SILENTLY UNDERSTATES SALES.
+SELECT
+    o.order_id,
+    o.order_status
+FROM "olist"."main_stg"."stg_olist__orders" AS o
+LEFT JOIN "olist"."main_stg"."stg_olist__order_items" AS i
+    ON o.order_id = i.order_id
+WHERE o.order_status = 'delivered'
+  AND i.order_id IS NULL
+  
+  
+      
+    ) dbt_internal_test
