@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "building-dbt-semantic-layer": {
+      "source": "dbt-labs/dbt-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/dbt/skills/building-dbt-semantic-layer/SKILL.md",
+      "computedHash": "48fc28760a4c850a827d00405c3e931da31f21f52285c5ab04f02fa3f68a6bbd"
+    },
+    "using-dbt-for-analytics-engineering": {
+      "source": "dbt-labs/dbt-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/dbt/skills/using-dbt-for-analytics-engineering/SKILL.md",
+      "computedHash": "154227ce8eaf50cb8b38099722c5358f215e4728f4f5c18ea33f89bee5b8f88a"
+    }
+  }
+}
